@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>応募効果シミュレーター</title>
+<meta name="robots" content="noindex, nofollow">
+<style>
+  :root { --navy:#1F3864; --line:#d6dbe3; --bg:#f6f7f9; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); font-family:-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", sans-serif; color:#222; }
+  .wrap { max-width:680px; margin:0 auto; padding:16px; }
+  h1 { font-size:18px; color:var(--navy); margin:4px 0 12px; }
+  label { display:block; font-size:13px; color:#555; margin:12px 0 4px; }
+  textarea, input, select { width:100%; font-size:16px; padding:10px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  .chk { display:flex; align-items:center; gap:8px; font-size:15px; color:#222; margin-top:12px; }
+  .chk input { width:auto; }
+  textarea { min-height:140px; resize:vertical; }
+  .row { display:flex; gap:10px; }
+  .row > div { flex:1; }
+  button { width:100%; font-size:17px; padding:14px; margin-top:14px; border:0; border-radius:10px; background:var(--navy); color:#fff; font-weight:bold; }
+  button:disabled { background:#9aa5b8; }
+  .link { background:none; color:var(--navy); font-weight:normal; font-size:13px; text-align:left; padding:6px 0; margin-top:6px; width:auto; text-decoration:underline; }
+  #opt { display:none; }
+  #status { margin-top:14px; font-size:15px; color:#555; min-height:1.4em; }
+  #out { display:none; margin-top:12px; background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; font-size:16px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
+  #copy { background:#548235; }
+  .small { font-size:12px; color:#888; margin-top:18px; }
+</style></head>
+<body><div class="wrap">
+  <h1>応募効果シミュレーター</h1>
+  <label for="src">求人原稿のURL／tldvのURL／原稿の本文（どれか1つ）</label>
+  <textarea id="src" placeholder="ここに貼る"></textarea>
+  <button class="link" type="button" id="toggle">広告費・期間・プランを変更する（既定：月1万円・3ヶ月・プランは自動）</button>
+  <div id="opt"><div class="row">
+    <div><label for="ad">広告費（月・万円）</label><input id="ad" type="number" inputmode="decimal" placeholder="1"></div>
+    <div><label for="months">期間（月数）</label><input id="months" type="number" inputmode="numeric" placeholder="3"></div>
+  </div>
+    <label for="plan">プラン</label>
+    <select id="plan"><option value="">自動（資料から読み取り。無ければスタンダード）</option></select>
+    <label class="chk"><input type="checkbox" id="byplan"> プラン別に並べる（数字の行をプランごとに出す）</label>
+  </div>
+  <button type="button" id="go">文面を作る</button>
+  <div id="status"></div>
+  <div id="out"></div>
+  <button type="button" id="copy" style="display:none">コピー</button>
+  <div class="small">貼ってから10秒ほどで出ます（Indeed の URL は15秒ほど）。URL を読めないときは、原稿の本文を貼ってください。</div>
+</div>
+<script>
+  // API（Google Apps Script の exec）。Cookie は送らない（credentials: 'omit'）。本文は JSON の文字列を text/plain のまま送る（プリフライト無し）
+  var API = 'https://script.google.com/macros/s/AKfycbwTRNlORaEtLaZowQtJ75eL_9R40TKyuIyKuYLIv8jwnsOBQGXVGjDI3xNN7mcisVv8/exec';
+  var $ = function (id) { return document.getElementById(id); };
+  var MSG = { empty: '原稿の本文を貼ってください', nosource: 'URL を読めませんでした。原稿の本文を貼ってください',
+    nokey: '設定が足りません（API キー）。管理者に連絡してください', ai: 'AI の読み取りに失敗しました。少し待って、もう一度試してください',
+    error: '文面を作れませんでした。原稿の本文を貼ってください', net: '通信に失敗しました。もう一度試してください' };
+  function post(body, ms) {
+    var ctl = ('AbortController' in window) ? new AbortController() : null;
+    var timer = ctl ? setTimeout(function () { ctl.abort(); }, ms || 70000) : null;
+    return fetch(API, { method: 'POST', credentials: 'omit', redirect: 'follow', body: JSON.stringify(body), signal: ctl ? ctl.signal : undefined })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (timer) clearTimeout(timer); return j; }, function (e) { if (timer) clearTimeout(timer); throw e; });
+  }
+  // プランの選択肢（マスタから）。取れるまでは「自動」だけ
+  fetch(API + '?action=plans', { credentials: 'omit', redirect: 'follow' }).then(function (r) { return r.json(); }).then(function (j) {
+    if (!j || !j.ok || !j.plans) return;
+    var sel = $('plan');
+    j.plans.forEach(function (p) { var o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
+  }).catch(function () {});
+  $('toggle').onclick = function () { var o = $('opt'); o.style.display = o.style.display === 'block' ? 'none' : 'block'; };
+  $('go').onclick = function () {
+    var src = $('src').value.trim();
+    if (!src) { $('status').textContent = MSG.empty; return; }
+    var open = $('opt').style.display === 'block';
+    var req = { src: src, ad: open ? $('ad').value : '', months: open ? $('months').value : '', plan: open ? $('plan').value : '', byPlan: open ? $('byplan').checked : false };
+    $('go').disabled = true; $('status').textContent = '作成中…'; $('out').style.display = 'none'; $('copy').style.display = 'none';
+    post(req).then(function (res) {
+      $('go').disabled = false;
+      if (!res || !res.ok) {
+        $('status').textContent = MSG[res && res.reason] || MSG.error;
+        if (res && res.detail && window.console) console.log(res.reason, res.detail);
+        return;
+      }
+      $('status').textContent = res.note || '';
+      $('out').textContent = res.text; $('out').style.display = 'block'; $('copy').style.display = 'block';
+      try { post({ action: 'log', log: res.log }, 30000).catch(function () {}); } catch (e) {}
+    }).catch(function (e) { $('go').disabled = false; $('status').textContent = MSG.net; if (window.console) console.log(e); });
+  };
+  $('copy').onclick = function () {
+    var t = $('out').textContent;
+    var done = function () { $('copy').textContent = 'コピーしました'; setTimeout(function () { $('copy').textContent = 'コピー'; }, 1500); };
+    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(t).then(done, function () { fallback(); }); } else { fallback(); }
+    function fallback() { var ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); done(); } catch (e) {} document.body.removeChild(ta); }
+  };
+</script></body></html>

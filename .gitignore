@@ -1,0 +1,6 @@
+.DS_Store
+.env
+*.key
+*.pem
+token.json
+client_secret.json
