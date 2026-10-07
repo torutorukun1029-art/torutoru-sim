@@ -23,12 +23,13 @@
   #out { display:none; margin-top:12px; background:#fff; border:1px solid var(--line); border-radius:10px; padding:14px; font-size:16px; line-height:1.7; white-space:pre-wrap; word-break:break-all; }
   #copy { background:#548235; }
   .small { font-size:12px; color:#888; margin-top:18px; }
+  .hint { font-size:12px; color:#888; margin:2px 0 0 26px; }
 </style></head>
 <body><div class="wrap">
   <h1>応募効果シミュレーター</h1>
   <label for="src">求人原稿のURL／tldvのURL／原稿の本文（どれか1つ）</label>
   <textarea id="src" placeholder="ここに貼る"></textarea>
-  <button class="link" type="button" id="toggle">広告費・期間・プランを変更する（既定：月1万円・3ヶ月・プランは自動）</button>
+  <button class="link" type="button" id="toggle">広告費・期間・プラン・成果報酬を変更する（既定：月1万円・3ヶ月・プランと成果報酬は自動）</button>
   <div id="opt"><div class="row">
     <div><label for="ad">広告費（月・万円）</label><input id="ad" type="number" inputmode="decimal" placeholder="1"></div>
     <div><label for="months">期間（月数）</label><input id="months" type="number" inputmode="numeric" placeholder="3"></div>
@@ -36,6 +37,8 @@
     <label for="plan">プラン</label>
     <select id="plan"><option value="">自動（資料から読み取り。無ければスタンダード）</option></select>
     <label class="chk"><input type="checkbox" id="byplan"> プラン別に並べる（数字の行をプランごとに出す）</label>
+    <label class="chk"><input type="checkbox" id="seika"> 成果報酬の採用単価も出す</label>
+    <div class="hint" id="seikahint">自動：資料に成果報酬・採用単価の話があればオン。職種が複数なら職種ごとに出します（最大6職種）</div>
   </div>
   <button type="button" id="go">文面を作る</button>
   <div id="status"></div>
@@ -63,12 +66,16 @@
     var sel = $('plan');
     j.plans.forEach(function (p) { var o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
   }).catch(function () {});
+  // 成果報酬のチェック：触るまでは「自動」（資料の読み取りで決まる）。手で切り替えたら、その値を優先する
+  var seikaManual = false;
+  $('seika').onchange = function () { seikaManual = true; $('seikahint').textContent = '手動：' + ($('seika').checked ? 'オン' : 'オフ') + '（資料の読み取りより優先）'; };
   $('toggle').onclick = function () { var o = $('opt'); o.style.display = o.style.display === 'block' ? 'none' : 'block'; };
   $('go').onclick = function () {
     var src = $('src').value.trim();
     if (!src) { $('status').textContent = MSG.empty; return; }
     var open = $('opt').style.display === 'block';
-    var req = { src: src, ad: open ? $('ad').value : '', months: open ? $('months').value : '', plan: open ? $('plan').value : '', byPlan: open ? $('byplan').checked : false };
+    var req = { src: src, ad: open ? $('ad').value : '', months: open ? $('months').value : '', plan: open ? $('plan').value : '', byPlan: open ? $('byplan').checked : false,
+      seika: (open && seikaManual) ? $('seika').checked : null };
     $('go').disabled = true; $('status').textContent = '作成中…'; $('out').style.display = 'none'; $('copy').style.display = 'none';
     post(req).then(function (res) {
       $('go').disabled = false;
@@ -78,6 +85,7 @@
         return;
       }
       $('status').textContent = res.note || '';
+      if (!seikaManual && typeof res.seika === 'boolean') $('seika').checked = res.seika;   // 自動で決まった状態を見せる（手動にはしない）
       $('out').textContent = res.text; $('out').style.display = 'block'; $('copy').style.display = 'block';
       try { post({ action: 'log', log: res.log }, 30000).catch(function () {}); } catch (e) {}
     }).catch(function (e) { $('go').disabled = false; $('status').textContent = MSG.net; if (window.console) console.log(e); });
