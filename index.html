@@ -49,20 +49,60 @@
 <script>
   // API（Google Apps Script の exec）。Cookie は送らない（credentials: 'omit'）。本文は JSON の文字列を text/plain のまま送る（プリフライト無し）
   var API = 'https://script.google.com/macros/s/AKfycbwTRNlORaEtLaZowQtJ75eL_9R40TKyuIyKuYLIv8jwnsOBQGXVGjDI3xNN7mcisVv8/exec';
+  // 読み取り係（資料の取得と AI の読み取りだけを、torutorukun1029 以外のアカウントで動かす GAS の exec）。ここが空なら、API の plans が返す reader を使う。どちらも空なら API だけで全部やる（前の形）
+  //   2026-10-14：torutorukun1029 の外部との通信の1日の上限（同じアカウントのほかの GAS と共有）に達して全員が使えなくなったため分けた
+  var READER = '';
   var $ = function (id) { return document.getElementById(id); };
-  var MSG = { empty: '原稿の本文を貼ってください', nosource: 'URL を読めませんでした。原稿の本文を貼ってください',
-    nokey: '設定が足りません（API キー）。管理者に連絡してください', ai: 'AI の読み取りに失敗しました。少し待って、もう一度試してください',
-    error: '文面を作れませんでした。原稿の本文を貼ってください', net: '通信に失敗しました。もう一度試してください' };
-  function post(body, ms) {
+  var MSG = { empty: '原稿の本文を貼ってください', nosource: 'URL を読めませんでした（掲載が終わっている・ページが開けないなど）。原稿の本文を貼ってください',
+    nokey: '設定が足りません（Claude の API キーが入っていない）。管理者に連絡してください',
+    ai: 'AI の読み取りに失敗しました（Claude の API の応答がエラー）。少し待って、もう一度試してください',
+    quota: 'Google の1日の通信の上限に達していて、今は作れません（同じアカウントのほかの自動処理と共有の枠）。管理者に連絡してください',
+    error: '文面を作れませんでした（裏の処理でエラー）。原稿の本文を貼って、もう一度試してください',
+    net: '裏の処理につながりませんでした（通信エラーか時間切れ）。もう一度試してください' };
+  function post(url, body, ms) {
     var ctl = ('AbortController' in window) ? new AbortController() : null;
     var timer = ctl ? setTimeout(function () { ctl.abort(); }, ms || 70000) : null;
-    return fetch(API, { method: 'POST', credentials: 'omit', redirect: 'follow', body: JSON.stringify(body), signal: ctl ? ctl.signal : undefined })
+    return fetch(url, { method: 'POST', credentials: 'omit', redirect: 'follow', body: JSON.stringify(body), signal: ctl ? ctl.signal : undefined })
       .then(function (r) { return r.json(); })
       .then(function (j) { if (timer) clearTimeout(timer); return j; }, function (e) { if (timer) clearTimeout(timer); throw e; });
+  }
+  // 失敗を同じ形にそろえる（前の版の GAS は上限のエラーを reason 'ai' で返すので、中身で quota に直す）
+  function fail(res, path) {
+    var r = (res && res.reason) || 'error', d = String((res && res.detail) || '');
+    if (/urlfetch|回数が多すぎます|too many times/i.test(d)) r = 'quota';
+    return { ok: false, reason: r, detail: d, path: path };
+  }
+  function netFail(e, path) { return { ok: false, reason: 'net', detail: String(e && (e.name === 'AbortError' ? '時間切れ' : (e.message || e))), path: path }; }
+  // 読み取り係 → API の compose。読み取り係が使えない（上限・エラー・通信）ときは、API だけで全部やる形に戻る
+  function run(req) {
+    var whole = function (first) {
+      return post(API, req).then(function (res) { if (res && res.ok) { res.path = 'API だけ'; return res; } var f = fail(res, 'API だけ'); f.first = first; return f; },
+        function (e) { var f = netFail(e, 'API だけ'); f.first = first; return f; });
+    };
+    if (!READER) return whole(null);
+    return post(READER, { action: 'read', src: req.src }).then(function (rd) {
+      if (!rd || !rd.ok) {
+        var f = fail(rd, '読み取り係');
+        if (f.reason === 'empty' || f.reason === 'nosource') return f;
+        return whole(f);
+      }
+      var c = {}; Object.keys(req).forEach(function (k) { c[k] = req[k]; }); c.action = 'compose'; c.read = rd;
+      return post(API, c).then(function (res) { if (res && res.ok) { res.path = '読み取り係＋API'; return res; } return fail(res, 'API の compose'); },
+        function (e) { return netFail(e, 'API の compose'); });
+    }, function (e) { return whole(netFail(e, '読み取り係')); });
+  }
+  function jst() { try { return new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour12: false }); } catch (e) { return String(new Date()); } }
+  // 失敗もログに1行（ログを書くのは API。シートの操作だけなので通信の上限には当たらない）
+  function logFail(req, f) {
+    var memo = '失敗：' + f.reason + '（' + (MSG[f.reason] || '') + '）\n経路：' + (f.path || '') + '\n詳細：' + f.detail.slice(0, 500) +
+      (f.first ? '\n先に試した経路：' + f.first.path + '／' + f.first.reason + '／' + String(f.first.detail || '').slice(0, 300) : '') +
+      '\n画面：' + navigator.userAgent.slice(0, 150);
+    try { post(API, { action: 'log', log: { at: jst(), src: String(req.src || '').slice(0, 3000), ad: req.ad, months: req.months, text: '（失敗）', memo: memo, model: '', sources: '', warnings: '', evidence: '' } }, 30000).catch(function () {}); } catch (e) {}
   }
   // プランの選択肢（マスタから）。取れるまでは「自動」だけ
   fetch(API + '?action=plans', { credentials: 'omit', redirect: 'follow' }).then(function (r) { return r.json(); }).then(function (j) {
     if (!j || !j.ok || !j.plans) return;
+    if (!READER && j.reader) READER = j.reader;   // 読み取り係の URL（GAS のスクリプト プロパティ READER_URL）
     var sel = $('plan');
     j.plans.forEach(function (p) { var o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
   }).catch(function () {});
@@ -77,18 +117,22 @@
     var req = { src: src, ad: open ? $('ad').value : '', months: open ? $('months').value : '', plan: open ? $('plan').value : '', byPlan: open ? $('byplan').checked : false,
       seika: (open && seikaManual) ? $('seika').checked : null };
     $('go').disabled = true; $('status').textContent = '作成中…'; $('out').style.display = 'none'; $('copy').style.display = 'none';
-    post(req).then(function (res) {
+    run(req).then(function (res) {
       $('go').disabled = false;
       if (!res || !res.ok) {
-        $('status').textContent = MSG[res && res.reason] || MSG.error;
-        if (res && res.detail && window.console) console.log(res.reason, res.detail);
+        var f = res || { reason: 'error', detail: '' };
+        $('status').innerHTML = '';
+        $('status').appendChild(document.createTextNode(MSG[f.reason] || MSG.error));
+        if (f.detail) { var d = document.createElement('div'); d.className = 'small'; d.textContent = '原因：' + f.detail.slice(0, 140); $('status').appendChild(d); }
+        if (window.console) console.log(f);
+        logFail(req, f);
         return;
       }
       $('status').textContent = res.note || '';
       if (!seikaManual && typeof res.seika === 'boolean') $('seika').checked = res.seika;   // 自動で決まった状態を見せる（手動にはしない）
       $('out').textContent = res.text; $('out').style.display = 'block'; $('copy').style.display = 'block';
-      try { post({ action: 'log', log: res.log }, 30000).catch(function () {}); } catch (e) {}
-    }).catch(function (e) { $('go').disabled = false; $('status').textContent = MSG.net; if (window.console) console.log(e); });
+      try { post(API, { action: 'log', log: res.log }, 30000).catch(function () {}); } catch (e) {}
+    });
   };
   $('copy').onclick = function () {
     var t = $('out').textContent;
