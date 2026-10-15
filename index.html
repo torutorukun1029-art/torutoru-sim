@@ -48,10 +48,12 @@
 </div>
 <script>
   // API（Google Apps Script の exec）。Cookie は送らない（credentials: 'omit'）。本文は JSON の文字列を text/plain のまま送る（プリフライト無し）
-  var API = 'https://script.google.com/macros/s/AKfycbwTRNlORaEtLaZowQtJ75eL_9R40TKyuIyKuYLIv8jwnsOBQGXVGjDI3xNN7mcisVv8/exec';
-  // 読み取り係（資料の取得と AI の読み取りだけを、torutorukun1029 以外のアカウントで動かす GAS の exec）。ここが空なら、API の plans が返す reader を使う。どちらも空なら API だけで全部やる（前の形）
-  //   2026-10-14：torutorukun1029 の外部との通信の1日の上限（同じアカウントのほかの GAS と共有）に達して全員が使えなくなったため分けた
-  var READER = '';
+  // 本体 API（torutorukun1029 の単独 GAS。計算・文面・ログ・プラン一覧。外部通信の権限なし＝上限に当たらない。clasp でデプロイ）
+  var API = 'https://script.google.com/macros/s/AKfycbw52LE0dOa1JyyGn41poI7UO4hOh9N2wYSGabVNH2mLCL0xGb7m8jroRZmteRmbiXdEUg/exec';
+  // 前の GAS（シートに紐づいた版。取得・読み取り・計算を1つで行う）。読み取り係か本体 API が失敗したときだけ使う（外部通信の上限を共有するので最後の手段）
+  var LEGACY = 'https://script.google.com/macros/s/AKfycbwTRNlORaEtLaZowQtJ75eL_9R40TKyuIyKuYLIv8jwnsOBQGXVGjDI3xNN7mcisVv8/exec';
+  // 読み取り係（Cloudflare Worker。資料の取得と Claude の読み取りだけ。Google の外なので GAS の上限と無関係。wrangler でデプロイ）
+  var READER = 'https://torutoru-sim-reader.torutoru-sim-reader.workers.dev';
   var $ = function (id) { return document.getElementById(id); };
   var MSG = { empty: '原稿の本文を貼ってください', nosource: 'URL を読めませんでした（掲載が終わっている・ページが開けないなど）。原稿の本文を貼ってください',
     nokey: '設定が足りません（Claude の API キーが入っていない）。管理者に連絡してください',
@@ -76,8 +78,10 @@
   // 読み取り係 → API の compose。読み取り係が使えない（上限・エラー・通信）ときは、API だけで全部やる形に戻る
   function run(req) {
     var whole = function (first) {
-      return post(API, req).then(function (res) { if (res && res.ok) { res.path = 'API だけ'; return res; } var f = fail(res, 'API だけ'); f.first = first; return f; },
-        function (e) { var f = netFail(e, 'API だけ'); f.first = first; return f; });
+      // 前の GAS も失敗したら、画面には最初の原因（読み取り係・本体 API）を出し、前の GAS の失敗は詳細とログに足す
+      var both = function (f) { if (!first) return f; var g = { ok: false, reason: first.reason, detail: String(first.detail || '') + ' ／ 前の GAS：' + f.reason + ' ' + f.detail, path: first.path }; g.first = f; return g; };
+      return post(LEGACY, req).then(function (res) { if (res && res.ok) { res.path = '前の GAS'; return res; } return both(fail(res, '前の GAS')); },
+        function (e) { return both(netFail(e, '前の GAS')); });
     };
     if (!READER) return whole(null);
     return post(READER, { action: 'read', src: req.src }).then(function (rd) {
@@ -87,22 +91,26 @@
         return whole(f);
       }
       var c = {}; Object.keys(req).forEach(function (k) { c[k] = req[k]; }); c.action = 'compose'; c.read = rd;
-      return post(API, c).then(function (res) { if (res && res.ok) { res.path = '読み取り係＋API'; return res; } return fail(res, 'API の compose'); },
-        function (e) { return netFail(e, 'API の compose'); });
+      return post(API, c).then(function (res) { if (res && res.ok) { res.path = '読み取り係＋本体 API'; return res; } return whole(fail(res, '本体 API の計算')); },
+        function (e) { return whole(netFail(e, '本体 API の計算')); });
     }, function (e) { return whole(netFail(e, '読み取り係')); });
+  }
+  // ログは本体 API に書く（シートの操作だけ）。だめなら前の GAS（どちらも同じシートの「ログ」タブ）
+  function postLog(log) {
+    return post(API, { action: 'log', log: log }, 30000).then(function (r) { if (!r || !r.ok) throw new Error('log'); }).catch(function () { return post(LEGACY, { action: 'log', log: log }, 30000).catch(function () {}); });
   }
   function jst() { try { return new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo', hour12: false }); } catch (e) { return String(new Date()); } }
   // 失敗もログに1行（ログを書くのは API。シートの操作だけなので通信の上限には当たらない）
   function logFail(req, f) {
     var memo = '失敗：' + f.reason + '（' + (MSG[f.reason] || '') + '）\n経路：' + (f.path || '') + '\n詳細：' + f.detail.slice(0, 500) +
-      (f.first ? '\n先に試した経路：' + f.first.path + '／' + f.first.reason + '／' + String(f.first.detail || '').slice(0, 300) : '') +
+      (f.first ? '\nほかに試した経路：' + f.first.path + '／' + f.first.reason + '／' + String(f.first.detail || '').slice(0, 300) : '') +
       '\n画面：' + navigator.userAgent.slice(0, 150);
-    try { post(API, { action: 'log', log: { at: jst(), src: String(req.src || '').slice(0, 3000), ad: req.ad, months: req.months, text: '（失敗）', memo: memo, model: '', sources: '', warnings: '', evidence: '' } }, 30000).catch(function () {}); } catch (e) {}
+    try { postLog({ at: jst(), src: String(req.src || '').slice(0, 3000), ad: req.ad, months: req.months, text: '（失敗）', memo: memo, model: '', sources: '', warnings: '', evidence: '' }); } catch (e) {}
   }
   // プランの選択肢（マスタから）。取れるまでは「自動」だけ
-  fetch(API + '?action=plans', { credentials: 'omit', redirect: 'follow' }).then(function (r) { return r.json(); }).then(function (j) {
+  var getPlans = function (base) { return fetch(base + '?action=plans', { credentials: 'omit', redirect: 'follow' }).then(function (r) { return r.json(); }); };
+  getPlans(API).then(function (j) { return (j && j.ok) ? j : getPlans(LEGACY); }, function () { return getPlans(LEGACY); }).then(function (j) {
     if (!j || !j.ok || !j.plans) return;
-    if (!READER && j.reader) READER = j.reader;   // 読み取り係の URL（GAS のスクリプト プロパティ READER_URL）
     var sel = $('plan');
     j.plans.forEach(function (p) { var o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); });
   }).catch(function () {});
@@ -131,7 +139,7 @@
       $('status').textContent = res.note || '';
       if (!seikaManual && typeof res.seika === 'boolean') $('seika').checked = res.seika;   // 自動で決まった状態を見せる（手動にはしない）
       $('out').textContent = res.text; $('out').style.display = 'block'; $('copy').style.display = 'block';
-      try { post(API, { action: 'log', log: res.log }, 30000).catch(function () {}); } catch (e) {}
+      try { postLog(res.log); } catch (e) {}
     });
   };
   $('copy').onclick = function () {
